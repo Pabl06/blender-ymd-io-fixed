@@ -4,7 +4,7 @@ from .operators import *
 bl_info = {
     "name": "ezPuniImporter_1.3.2_UNFINISHED_BETA_BUILD",
     "author": "hina, pabl06 & Math_kk",
-    "version": (1, 0),
+    "version": (1, 2, 0),
     "blender": (2, 80, 0),
     "location": "File > Import-Export > ez",
     "description": "Import Yo-kai Watch Puni Puni's character models, Crank-a-kai models & Chibi Map models.",
