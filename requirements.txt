@@ -1,0 +1,3 @@
+Any Blender 4v.
+pycryptodome
+Python 3
