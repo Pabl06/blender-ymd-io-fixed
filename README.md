@@ -5,8 +5,8 @@ A Blender plugin that decompiles Yo-kai Watch Puni Puni ".ez" files and convert 
 
 ## How to install?
 On Blender, go to "Edit" --> "Preferences..." --> "Add-ons" --> "Install from disk..." and open the ".zip" you downloaded on the Releases.
-<img width="500" height="90" alt="image" src="https://github.com/user-attachments/assets/fd354110-1b79-4f0d-b6fc-f8e26dc49aba" />
-<img width="500" height="173" alt="image" src="https://github.com/user-attachments/assets/91ae1ce3-6e25-4912-8ff9-9979a0ab4e22" />
+!<img width="500" height="90" alt="image" src="https://github.com/user-attachments/assets/fd354110-1b79-4f0d-b6fc-f8e26dc49aba" />
+!<img width="500" height="173" alt="image" src="https://github.com/user-attachments/assets/91ae1ce3-6e25-4912-8ff9-9979a0ab4e22" />
 To install "pycryptodome", go to:
 ```bash
 C:\Program Files\Blender Foundation\Your Blender Version\Your Blender Version\python\bin"
