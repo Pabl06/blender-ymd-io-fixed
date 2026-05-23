@@ -12,7 +12,9 @@ from mathutils import Matrix,Vector,Quaternion
 
 versions = [
     20158017,
-    20181101
+    20160310,
+    20181101,
+    20250501
 ]
 
 
@@ -76,12 +78,19 @@ def get_geometries(data,a_mesh_length):
     if mesh_length > 0:
         for i in range(mesh_length):
             positions.append(list(struct.unpack("<3f", data.read(12))))
-            normals.append(list(struct.unpack("<3f", data.read(12))))
 
-            if a_mesh_length == 48:
+            if a_mesh_length < 32:
+                # Map vertex format: xyz(12) + uv(8), no normals
+                normals.append([0.0, 0.0, 1.0])
+                uvs.append(list(struct.unpack("<2f", data.read(8))))
+                if a_mesh_length > 20:
+                    data.read(a_mesh_length - 20)
+            elif a_mesh_length == 48:
+                normals.append(list(struct.unpack("<3f", data.read(12))))
                 data.read(16)
                 uvs.append(list(struct.unpack("<2f", data.read(8))))
             else:
+                normals.append(list(struct.unpack("<3f", data.read(12))))
                 uvs.append(list(struct.unpack("<2f", data.read(8))))
                 if a_mesh_length > 32:
                     data.read(a_mesh_length - 32)
@@ -95,10 +104,10 @@ def get_geometries(data,a_mesh_length):
 
         return positions, uvs, normals, faces, face_groups_idx
 
-patterns = ["geometries", "skin","sikn"]
+patterns = ["geometries", "skin", "sikn", "geom"]
 key = b'\x2a\xb5\x11\xf4\x77\x97\x7d\x25\xcf\x6f\x7a\x8a\xe0\x49\xa1\x25'
 
-def to_obj(file_path,directory):
+def to_obj(file_path, directory, clear_scene=True):
     """
     Reads an EZ file, extracts mesh data, and writes .obj files.
 
@@ -132,8 +141,8 @@ def to_obj(file_path,directory):
     with open(file_path, 'rb') as file:
         ver = struct.unpack("<i",  file.read(4))[0]
         file.seek(0)
-        # Read the first 400 bytes of the file
-        data = file.read(400)
+        # Read the first 600 bytes of the file (crank-a-kai ymds can have the pattern further in)
+        data = file.read(600)
 
         for pattern in patterns:
             # Find all occurrences of the text in the data
@@ -168,13 +177,24 @@ def to_obj(file_path,directory):
                         object_name = file.read(struct.unpack("<i", file.read(4))[0]).decode()
                         a_mesh_length = struct.unpack("<i", file.read(4))[0]
                     else:
-                        tmp = file.tell()
                         for i in range(loop_count-1):
                             file.read(8)
-                            object_name = file.read(struct.unpack("<i", file.read(4))[0]).decode()
+                            sub_object_name = file.read(struct.unpack("<i", file.read(4))[0]).decode()
                             a_mesh_length = struct.unpack("<i", file.read(4))[0]
-                            get_geometries(file,a_mesh_length)
-                            print(file.tell())
+                            sub_result = get_geometries(file, a_mesh_length)
+                            if sub_result is not None:
+                                sub_pos, sub_uvs, sub_normals, sub_faces, sub_fg = sub_result
+                                if sub_object_name not in objects:
+                                    objects[sub_object_name] = {}
+                                if mesh_name not in objects[sub_object_name]:
+                                    objects[sub_object_name][mesh_name] = {}
+                                objects[sub_object_name][mesh_name].setdefault("positions", []).extend(sub_pos)
+                                objects[sub_object_name][mesh_name].setdefault("uvs", []).extend(sub_uvs)
+                                objects[sub_object_name][mesh_name].setdefault("normals", []).extend(sub_normals)
+                                objects[sub_object_name][mesh_name].setdefault("faces", []).extend(sub_faces)
+                                objects[sub_object_name][mesh_name].setdefault("face_groups_idx", []).extend(sub_fg)
+                                objects[sub_object_name][mesh_name]["bone_names"] = []
+                                objects[sub_object_name][mesh_name]["face_groups"] = []
                         file.read(8)
                         object_name = file.read(struct.unpack("<i", file.read(4))[0]).decode()
                         a_mesh_length = struct.unpack("<i", file.read(4))[0]
@@ -206,69 +226,90 @@ def to_obj(file_path,directory):
                     file.seek(tmp)
                     file.read(64)
                     bone_length = struct.unpack("<i", file.read(4))[0]
-                d = filter(lambda k: object_name in list(k[1]), objects.items())
-                parent_name = list(dict(d).keys())[0]
-                objects[parent_name][object_name]["bone_names"] = []
+                # object_name here may be a geometry block name (e.g. "geometries_3") rather
+                # than an object name. Collect ALL objects that contain it as a mesh key.
+                affected = [(pname, mname)
+                            for pname, meshes in objects.items()
+                            for mname in meshes
+                            if mname == object_name or pname == object_name]
+
+                # Read bone names and matrices once
+                skin_bone_names = []
                 for j in range(bone_length):
                     bone_name = file.read(struct.unpack("<i", file.read(4))[0]).decode()
-                    objects[parent_name][object_name]["bone_names"].append(bone_name)
+                    skin_bone_names.append(bone_name)
                     bone = list(struct.unpack("<%df" % 16, file.read(64)))
-                    rotation_matrix = [
+                    rotation_matrix = Matrix([
                         [bone[0],bone[1],bone[2],bone[3]],
                         [bone[4],bone[5],bone[6],bone[7]],
                         [bone[8],bone[9],bone[10],bone[11]],
                         [bone[12],bone[13],bone[14],bone[15]]
-                    ]
-                    rotation_matrix = Matrix(rotation_matrix)
+                    ])
+                    bones[bone_name] = {"matrix": rotation_matrix}
 
-                    bones[bone_name] = {}
-                    bones[bone_name]["matrix"] = rotation_matrix
-
-                objects[parent_name][object_name]["face_groups"] = []
+                # Read face groups once
+                skin_face_groups = []
                 for j in range(struct.unpack("<i", file.read(4))[0]):
-                    tmp = {}
-                    tmp["bone_idx"]  = []
-                    tmp["weight"] = []
+                    tmp = {"bone_idx": [], "weight": []}
                     for k in range(struct.unpack("<i", file.read(4))[0]):
                         tmp["bone_idx"].append(struct.unpack("<i", file.read(4))[0])
                         tmp["weight"].append(struct.unpack("<f", file.read(4))[0])
-                    objects[parent_name][object_name]["face_groups"].append(tmp)
+                    skin_face_groups.append(tmp)
+
+                # Apply to every object that shares this geometry block
+                for pname, mname in affected:
+                    objects[pname][mname]["bone_names"] = skin_bone_names
+                    objects[pname][mname]["face_groups"] = skin_face_groups
 
             for i in range(struct.unpack("<i", file.read(4))[0]): # bones
                 bone_name = file.read(struct.unpack("<i", file.read(4))[0]).decode()
-                bone_names.append(bone_name)
                 next_bone_name_length = struct.unpack("<i", file.read(4))[0]
                 if next_bone_name_length != 0:
                     next_bone_name = file.read(next_bone_name_length).decode()
+                else:
+                    next_bone_name = None
 
+                has_mesh_ref = struct.unpack("<i", file.read(4))[0]
+                if has_mesh_ref != 0:
+                    geom_name = file.read(struct.unpack("<i", file.read(4))[0]).decode()
+                else:
+                    geom_name = None
+                list(struct.unpack("<%df" % 10, file.read(40)))
+
+                # Bones with empty names are "proxy" nodes — they exist only to attach
+                # a mesh to the parent bone. Resolve them to the parent bone name.
+                if not bone_name:
+                    # Use parent bone as the resolved name for mesh binding
+                    resolved_bone = next_bone_name if next_bone_name else None
+                    if geom_name and resolved_bone:
+                        mesh_names[geom_name] = resolved_bone
+                    # Do NOT add empty-named bones to bone_names or root
+                    continue
+
+                bone_names.append(bone_name)
+
+                if next_bone_name:
                     tmp = root
-                    for j in find_key(root,next_bone_name):
+                    bone_path = find_key(root, next_bone_name)
+                    for j in (bone_path or [next_bone_name]):
                         tmp.setdefault(j, {})
                         tmp = tmp[j]
                     tmp[bone_name] = {}
-                    if struct.unpack("<i", file.read(4))[0]==0:
-                        list(struct.unpack("<%df" % 10, file.read(40)))
-                    else:
-                        mesh_names[file.read(struct.unpack("<i", file.read(4))[0]).decode()] = bone_name
-                        list(struct.unpack("<%df" % 10, file.read(40)))
-                        pass
                 else:
                     root[bone_name] = {}
-                    if struct.unpack("<i", file.read(4))[0]==0:
-                        list(struct.unpack("<%df" % 10, file.read(40)))
-                    else:
-                        mesh_names[file.read(struct.unpack("<i", file.read(4))[0]).decode()] = bone_name
-                        list(struct.unpack("<%df" % 10, file.read(40)))
-                        pass
+
+                if geom_name:
+                    mesh_names[geom_name] = bone_name
 
             for i in range(struct.unpack("<i", file.read(4))[0]):
                 animation_name = file.read(struct.unpack("<i", file.read(4))[0]).decode()
                 file.read(4)
                 animations[animation_name] = {}
-                animation_length = 0
                 for j in range(struct.unpack("<i", file.read(4))[0]):
                     bone_name = file.read(struct.unpack("<i", file.read(4))[0]).decode()
                     animations[animation_name][bone_name] = []
+                    # animation_length must be re-detected independently for each bone
+                    animation_length = 12
                     for k in range(struct.unpack("<i", file.read(4))[0]):
                         animations[animation_name][bone_name].append({
                             "time":struct.unpack("<f", file.read(4))[0],
@@ -277,7 +318,8 @@ def to_obj(file_path,directory):
                             "location":list(struct.unpack("<%df" % 3, file.read(12))),
                         })
                         file.read(4)
-                        # 長さ確認（仮）
+                        # 長さ確認（仮）: detect extra floats per frame by probing the
+                        # gap between frame 0 and frame 1 timestamps.
                         if k == 0:
                             tmp = file.tell()
                             time = animations[animation_name][bone_name][0]["time"]
@@ -293,7 +335,25 @@ def to_obj(file_path,directory):
                         (list(struct.unpack("<%df" % (animation_length-12), file.read((animation_length-12)*4))))
                 file.read(4)
 
-            blender(root,bone_names,bones,objects,animations,mesh_names,directory,aura,ver)
+            # --- Rigid prop fix ---
+            # Objects with no skin block (e.g. accessories on a separate geometry block)
+            # should be rigidly bound to the bone that mesh_names maps their geometry
+            # block to. Give every vertex weight 1.0 on that one bone.
+            for pname, meshes in objects.items():
+                for mname, mdata in meshes.items():
+                    if not mdata["bone_names"]:
+                        target_bone = mesh_names.get(mname)
+                        # target_bone may be empty string if the file had empty-named proxy
+                        # bones that weren't resolved; fall back to None in that case.
+                        if not target_bone:
+                            target_bone = None
+                        if target_bone and target_bone in bone_names:
+                            vert_count = len(mdata["positions"])
+                            mdata["bone_names"] = [target_bone]
+                            mdata["face_groups"] = [{"bone_idx": [0], "weight": [1.0]}]
+                            mdata["face_groups_idx"] = [0] * vert_count
+
+            blender(root,bone_names,bones,objects,animations,mesh_names,directory,aura,ver,clear_scene=clear_scene)
             # write_obj(objects, os.path.dirname(file_path) + "/" + file_name + "/")
             return True
         else:
@@ -363,7 +423,8 @@ def load_aura(file_path):
                 next_bone_name = file.read(next_bone_name_length).decode()
 
                 tmp = root
-                for j in find_key(root,next_bone_name):
+                bone_path = find_key(root, next_bone_name)
+                for j in (bone_path or [next_bone_name]):
                     tmp.setdefault(j, {})
                     tmp = tmp[j]
                 tmp[object_name] = {}
@@ -450,24 +511,25 @@ def find_key(d, target):
 
     return dfs(d, [])
 
-def blender(root,bone_names,bones,objects,animations,mesh_names,directory,aura,ver):
+def blender(root,bone_names,bones,objects,animations,mesh_names,directory,aura,ver,clear_scene=True):
 
     tex_list = list(pathlib.Path(directory).glob('*.png'))
 
-    for item in bpy.data.objects:
-        bpy.data.objects.remove(item)
+    if clear_scene:
+        for item in bpy.data.objects:
+            bpy.data.objects.remove(item)
 
-    for item in bpy.data.meshes:
-        bpy.data.meshes.remove(item)
+        for item in bpy.data.meshes:
+            bpy.data.meshes.remove(item)
 
-    for item in bpy.data.materials:
-        bpy.data.materials.remove(item)
+        for item in bpy.data.materials:
+            bpy.data.materials.remove(item)
 
-    for item in bpy.data.actions:
-        bpy.data.actions.remove(item)
+        for item in bpy.data.actions:
+            bpy.data.actions.remove(item)
 
-    for item in bpy.data.images:
-        bpy.data.images.remove(item)
+        for item in bpy.data.images:
+            bpy.data.images.remove(item)
     
     for i in tex_list:
         bpy.data.images.load(str(i))
@@ -483,13 +545,19 @@ def blender(root,bone_names,bones,objects,animations,mesh_names,directory,aura,v
         
         mat.node_tree.links.new(tex_node.outputs[0], principled_BSDF.inputs[0])
 
+    # Pick the first non-empty key in root as the armature name.
+    # Some YMD files have empty-named root nodes (proxy bones); skip them.
+    valid_root_keys = [k for k in root.keys() if k.strip()]
+    armature_name = valid_root_keys[0] if valid_root_keys else "Armature"
+
     bpy.ops.object.add(radius=1.0, type='ARMATURE', enter_editmode=False, align='WORLD', location=(0.0, 0.0, 0.0), rotation=(math.pi/2, 0.0, 0.0), scale=(0.0, 0.0, 0.0))
-    bpy.context.active_object.name = list(root.keys())[0]
+    armature_obj = bpy.context.active_object
+    armature_obj.name = armature_name
 
     bpy.ops.object.mode_set(mode='EDIT', toggle=False)
-    bpy.context.view_layer.objects.active = bpy.data.objects[list(root.keys())[0]]
+    bpy.context.view_layer.objects.active = armature_obj
     for i in bone_names:
-        bone = bpy.data.objects[list(root.keys())[0]].data.edit_bones.new(i)
+        bone = bpy.data.objects[armature_name].data.edit_bones.new(i)
         bone.head.x = 0
         bone.head.y = -1
         bone.head.z = 0
@@ -505,18 +573,24 @@ def blender(root,bone_names,bones,objects,animations,mesh_names,directory,aura,v
         else:
             bone.matrix = Matrix(((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1)))
         
-        if len(find_key(root,i)) == 1:
-            pass
+        bone_path = find_key(root, i)
+        if bone_path is None or len(bone_path) == 1:
+            pass  # root-level bone or not found in hierarchy — no parent
         else:
-            bone.parent = bpy.data.objects[list(root.keys())[0]].data.edit_bones[find_key(root,i)[-2]]
-    bpy.data.objects[list(root.keys())[0]].data.name = list(root.keys())[0]
+            parent_name = bone_path[-2]
+            # Guard against empty-named parent keys that may remain in root
+            if parent_name and parent_name in bpy.data.objects[armature_name].data.edit_bones:
+                bone.parent = bpy.data.objects[armature_name].data.edit_bones[parent_name]
+    bpy.data.objects[armature_name].data.name = armature_name
         
 
     # binding
     for object_name, meshes in objects.items():
         for mesh_name, mesh_data in meshes.items():
-            if mesh_name in mesh_names.keys():
-                n_mesh_name = mesh_names[mesh_name]
+            if True:
+                n_mesh_name = mesh_names.get(mesh_name, mesh_name)
+                if not n_mesh_name:
+                    n_mesh_name = mesh_name
                 mesh = bpy.data.meshes.new(n_mesh_name)
                 obj = bpy.data.objects.new(n_mesh_name,mesh)
                 mesh.from_pydata(mesh_data["positions"],[],mesh_data["faces"])
@@ -537,7 +611,7 @@ def blender(root,bone_names,bones,objects,animations,mesh_names,directory,aura,v
                         uv.data[loop.index].uv = tuple([objects[object_name][mesh_name]["uvs"][loop.index][0],1.0-objects[object_name][mesh_name]["uvs"][loop.index][1]])
 
                 
-                bpy.data.objects[n_mesh_name].parent = bpy.data.objects[list(root.keys())[0]]
+                obj.parent = bpy.data.objects[armature_name]
 
                 group_vertices = []
                 for i in enumerate(objects[object_name][mesh_name]["bone_names"]):
@@ -556,7 +630,7 @@ def blender(root,bone_names,bones,objects,animations,mesh_names,directory,aura,v
                         group.add([j[0]], j[1], 'ADD')
                 
                 obj.modifiers.new("Armature","ARMATURE")
-                obj.modifiers["Armature"].object = bpy.data.objects[list(root.keys())[0]]
+                obj.modifiers["Armature"].object = bpy.data.objects[armature_name]
 
                 if object_name[-5:-3] in [i[-2:] for i in bpy.data.materials.keys()] and object_name[-2:] == "01":
                     obj.data.materials.append(bpy.data.materials[[i for i in bpy.data.materials.keys() if i[-2:] == object_name[-5:-3]][0]])
@@ -584,21 +658,21 @@ def blender(root,bone_names,bones,objects,animations,mesh_names,directory,aura,v
 
     # animations
     scene = bpy.context.scene
-    armature = bpy.data.objects[list(root.keys())[0]].data
+    armature = bpy.data.objects[armature_name].data
     
     # Switch to Pose Mode
-    bpy.context.view_layer.objects.active = bpy.data.objects[list(root.keys())[0]]
+    bpy.context.view_layer.objects.active = bpy.data.objects[armature_name]
     bpy.ops.object.mode_set(mode='POSE')
     
-    if bpy.data.objects[list(root.keys())[0]].animation_data:
-        bpy.data.objects[list(root.keys())[0]].animation_data_clear()
+    if bpy.data.objects[armature_name].animation_data:
+        bpy.data.objects[armature_name].animation_data_clear()
     
-    bpy.data.objects[list(root.keys())[0]].animation_data_create()
+    bpy.data.objects[armature_name].animation_data_create()
     for a_name,anim in animations.items():
         frame_count = len(animations[a_name][list(animations[a_name].keys())[0]])
 
         action = bpy.data.actions.new(name=a_name)
-        bpy.data.objects[list(root.keys())[0]].animation_data.action = action
+        bpy.data.objects[armature_name].animation_data.action = action
         
         scene.frame_start = 0
         scene.frame_end = frame_count
@@ -609,7 +683,7 @@ def blender(root,bone_names,bones,objects,animations,mesh_names,directory,aura,v
 
         for frame in range(frame_count):
             for b_name,bone in animations[a_name].items():
-                pose_bone = bpy.data.objects[list(root.keys())[0]].pose.bones[b_name]
+                pose_bone = bpy.data.objects[armature_name].pose.bones[b_name]
 
                 location = calculate_transformed_location(pose_bone,Vector([bone[frame]["location"][0],bone[frame]["location"][1],bone[frame]["location"][2]]))
                 for i in range(3):
